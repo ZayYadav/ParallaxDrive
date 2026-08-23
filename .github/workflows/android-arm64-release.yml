@@ -1,0 +1,219 @@
+name: Build Parallax Drive ARM64 Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - parallax-drive-android-apk
+    paths:
+      - "app/**"
+      - ".github/workflows/android-arm64-release.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - ".github/workflows/android-arm64-release.yml"
+
+concurrency:
+  group: parallax-drive-arm64-release-only
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-release:
+    name: ARM64 release APK only
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      NDK_VERSION: "28.0.12433566"
+      APP_ID: "com.parallax.drive"
+      MAIN_ACTIVITY: "com.parallax.drive.MainActivity"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK + ARM64 NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Setup Rust ARM64 target only
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Recreate Tauri Android project
+        working-directory: app
+        env:
+          CI: "true"
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src-tauri/gen/android
+          npm run tauri android init -- --ci
+
+      - name: Verify Parallax Drive Android namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="app/src-tauri/gen/android"
+          test -d "$ROOT"
+
+          if grep -RIn --exclude-dir=build --exclude='*.lock' 'com\.cameronamer\.telegramdrive' "$ROOT"; then
+            echo "::error::Old Telegram Drive package reference found"
+            exit 1
+          fi
+
+          MAIN="$(find "$ROOT/app/src" -type f \( -name 'MainActivity.kt' -o -name 'MainActivity.java' \) -print -quit)"
+          test -n "$MAIN"
+          grep -F 'package com.parallax.drive' "$MAIN"
+
+      - name: Enable release shrinking and strip native symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/src-tauri/gen/android/app/build.gradle.kts")
+          if not p.exists():
+              raise SystemExit(f"missing generated Gradle file: {p}")
+
+          s = p.read_text()
+          s = re.sub(r'\s*jniLibs\.keepDebugSymbols\.add\("[^"]+"\)', '', s)
+
+          if "isShrinkResources = true" not in s:
+              s, count = re.subn(
+                  r'(getByName\("release"\)\s*\{\s*\n\s*isMinifyEnabled\s*=\s*true)',
+                  r'\1\n            isShrinkResources = true',
+                  s,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit("could not patch release buildType")
+
+          p.write_text(s)
+          PY
+
+      - name: Build obfuscated optimized ARM64 release APK
+        working-directory: app
+        env:
+          CI: "true"
+          PARALLAX_RELEASE_OBFUSCATE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri android build -- \
+            --apk true \
+            --ci \
+            --target aarch64
+
+      - name: Sign ARM64 release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' -print | head -1)"
+          if [ -z "$APK" ]; then
+            APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print | head -1)"
+          fi
+          test -n "$APK"
+
+          mkdir -p artifacts
+          BUILD_TOOLS="${ANDROID_HOME}/build-tools/36.0.0"
+          KEYSTORE="${RUNNER_TEMP}/parallax-arm64-release.jks"
+          STORE_PASS="ParallaxRelease2026"
+
+          keytool -genkeypair -noprompt \
+            -keystore "$KEYSTORE" \
+            -storepass "$STORE_PASS" \
+            -keypass "$STORE_PASS" \
+            -alias parallax \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -dname "CN=Parallax Drive, OU=Parallax, O=Parallax, L=Surat, ST=Gujarat, C=IN"
+
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$APK" artifacts/ParallaxDrive-arm64-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias parallax \
+            --ks-pass "pass:${STORE_PASS}" \
+            --key-pass "pass:${STORE_PASS}" \
+            --out artifacts/ParallaxDrive-arm64-release.apk \
+            artifacts/ParallaxDrive-arm64-release-aligned.apk
+
+          rm -f artifacts/ParallaxDrive-arm64-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs artifacts/ParallaxDrive-arm64-release.apk
+
+      - name: Validate ARM64-only release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="artifacts/ParallaxDrive-arm64-release.apk"
+          BUILD_TOOLS="${ANDROID_HOME}/build-tools/36.0.0"
+
+          BADGING="$($BUILD_TOOLS/aapt dump badging "$APK")"
+          printf '%s\n' "$BADGING" | grep -F "package: name='${APP_ID}'"
+          printf '%s\n' "$BADGING" | grep -F "launchable-activity: name='${MAIN_ACTIVITY}'"
+
+          ABI_LIST="$(unzip -Z1 "$APK" | awk -F/ '/^lib\/[^/]+\// {print $2}' | sort -u)"
+          echo "ABIs in APK:"
+          printf '%s\n' "$ABI_LIST"
+          test "$ABI_LIST" = "arm64-v8a"
+
+          FOUND_NEW=0
+          while IFS= read -r dex; do
+            if unzip -p "$APK" "$dex" | strings | grep -Fq 'Lcom/parallax/drive/MainActivity;'; then
+              FOUND_NEW=1
+            fi
+            if unzip -p "$APK" "$dex" | strings | grep -Fq 'Lcom/cameronamer/telegramdrive/MainActivity;'; then
+              echo "::error::Old MainActivity class found in release DEX"
+              exit 1
+            fi
+          done < <(unzip -Z1 "$APK" | grep -E '^classes([0-9]+)?\.dex$')
+
+          test "$FOUND_NEW" -eq 1
+          ls -lh "$APK"
+
+      - name: Upload ARM64 release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParallaxDrive-ARM64-Release-APK
+          path: artifacts/ParallaxDrive-arm64-release.apk
+          if-no-files-found: error
+          retention-days: 14
