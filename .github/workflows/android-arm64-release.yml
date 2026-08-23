@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   arm64-release:
-    name: ARM64 release APK only
+    name: Crash-hardened ARM64 release APK
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -33,6 +33,7 @@ jobs:
       NDK_VERSION: "28.0.12433566"
       APP_ID: "com.parallax.drive"
       MAIN_ACTIVITY: "com.parallax.drive.MainActivity"
+      UPLOAD_SERVICE: "com.parallax.drive.UploadForegroundService"
 
     steps:
       - name: Checkout
@@ -86,21 +87,45 @@ jobs:
           rm -rf src-tauri/gen/android
           npm run tauri android init -- --ci
 
-      - name: Verify Parallax Drive Android namespace
+      - name: Prepare crash-safe Android runtime glue
+        working-directory: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/prepare-android-runtime.cjs
+
+      - name: Verify Parallax Drive Android runtime sources
         shell: bash
         run: |
           set -euo pipefail
           ROOT="app/src-tauri/gen/android"
           test -d "$ROOT"
 
-          if grep -RIn --exclude-dir=build --exclude='*.lock' 'com\.cameronamer\.telegramdrive' "$ROOT"; then
-            echo "::error::Old Telegram Drive package reference found"
+          if grep -RIn --exclude-dir=build --exclude='*.lock' 'com\.cameronamer\.telegramdrive' \
+            app/src-tauri/src "$ROOT"; then
+            echo "::error::Old Telegram Drive package reference remains in Android build sources"
             exit 1
           fi
 
-          MAIN="$(find "$ROOT/app/src" -type f \( -name 'MainActivity.kt' -o -name 'MainActivity.java' \) -print -quit)"
+          MAIN="$(find "$ROOT/app/src" -type f -name 'MainActivity.kt' -print -quit)"
+          SERVICE="$(find "$ROOT/app/src" -type f -name 'UploadForegroundService.kt' -print -quit)"
+          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+          PATHS="$ROOT/app/src/main/res/xml/parallax_file_paths.xml"
+
           test -n "$MAIN"
+          test -n "$SERVICE"
+          test -f "$MANIFEST"
+          test -f "$PATHS"
+
           grep -F 'package com.parallax.drive' "$MAIN"
+          grep -F 'fun openFileExternally' "$MAIN"
+          grep -F 'fun getAndClearShareCount' "$MAIN"
+          grep -F 'package com.parallax.drive' "$SERVICE"
+          grep -F 'fun startService' "$SERVICE"
+          grep -F 'fun stopService' "$SERVICE"
+          grep -F 'com.parallax.drive.UploadForegroundService' "$MANIFEST"
+          grep -F '${applicationId}.fileprovider' "$MANIFEST"
+          grep -F 'android.permission.FOREGROUND_SERVICE' "$MANIFEST"
 
       - name: Enable release shrinking and strip native symbols
         shell: bash
@@ -143,7 +168,7 @@ jobs:
             --ci \
             --target aarch64
 
-      - name: Sign ARM64 release APK
+      - name: Sign and 16K-align ARM64 release APK
         shell: bash
         run: |
           set -euo pipefail
@@ -168,7 +193,9 @@ jobs:
             -validity 10000 \
             -dname "CN=Parallax Drive, OU=Parallax, O=Parallax, L=Surat, ST=Gujarat, C=IN"
 
-          "$BUILD_TOOLS/zipalign" -p -f 4 "$APK" artifacts/ParallaxDrive-arm64-release-aligned.apk
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 \
+            "$APK" artifacts/ParallaxDrive-arm64-release-aligned.apk
+
           "$BUILD_TOOLS/apksigner" sign \
             --ks "$KEYSTORE" \
             --ks-key-alias parallax \
@@ -179,8 +206,9 @@ jobs:
 
           rm -f artifacts/ParallaxDrive-arm64-release-aligned.apk
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs artifacts/ParallaxDrive-arm64-release.apk
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 artifacts/ParallaxDrive-arm64-release.apk
 
-      - name: Validate ARM64-only release APK
+      - name: Validate crash-critical APK contents
         shell: bash
         run: |
           set -euo pipefail
@@ -190,30 +218,66 @@ jobs:
           BADGING="$($BUILD_TOOLS/aapt dump badging "$APK")"
           printf '%s\n' "$BADGING" | grep -F "package: name='${APP_ID}'"
           printf '%s\n' "$BADGING" | grep -F "launchable-activity: name='${MAIN_ACTIVITY}'"
+          printf '%s\n' "$BADGING" | grep -F "sdkVersion:'24'"
 
           ABI_LIST="$(unzip -Z1 "$APK" | awk -F/ '/^lib\/[^/]+\// {print $2}' | sort -u)"
           echo "ABIs in APK:"
           printf '%s\n' "$ABI_LIST"
           test "$ABI_LIST" = "arm64-v8a"
 
-          FOUND_NEW=0
+          DEX_DUMP="${RUNNER_TEMP}/parallax-dex-strings.txt"
+          : > "$DEX_DUMP"
           while IFS= read -r dex; do
-            if unzip -p "$APK" "$dex" | strings | grep -Fq 'Lcom/parallax/drive/MainActivity;'; then
-              FOUND_NEW=1
-            fi
-            if unzip -p "$APK" "$dex" | strings | grep -Fq 'Lcom/cameronamer/telegramdrive/MainActivity;'; then
-              echo "::error::Old MainActivity class found in release DEX"
-              exit 1
-            fi
+            unzip -p "$APK" "$dex" | strings >> "$DEX_DUMP"
           done < <(unzip -Z1 "$APK" | grep -E '^classes([0-9]+)?\.dex$')
 
-          test "$FOUND_NEW" -eq 1
+          grep -F 'Lcom/parallax/drive/MainActivity;' "$DEX_DUMP"
+          grep -F 'Lcom/parallax/drive/UploadForegroundService;' "$DEX_DUMP"
+          grep -F 'openFileExternally' "$DEX_DUMP"
+          grep -F 'getAndClearShareCount' "$DEX_DUMP"
+          if grep -F 'Lcom/cameronamer/telegramdrive/' "$DEX_DUMP"; then
+            echo "::error::Old package class remains in release DEX"
+            exit 1
+          fi
+
+          NATIVE="${RUNNER_TEMP}/libapp_lib.so"
+          unzip -p "$APK" 'lib/arm64-v8a/libapp_lib.so' > "$NATIVE"
+          test -s "$NATIVE"
+
+          NATIVE_STRINGS="${RUNNER_TEMP}/parallax-native-strings.txt"
+          strings "$NATIVE" > "$NATIVE_STRINGS"
+          grep -F 'com.parallax.drive.MainActivity' "$NATIVE_STRINGS"
+          grep -F 'com.parallax.drive.UploadForegroundService' "$NATIVE_STRINGS"
+          if grep -F 'com.cameronamer.telegramdrive' "$NATIVE_STRINGS"; then
+            echo "::error::Old package string remains in native library"
+            exit 1
+          fi
+
+          python3 - "$NATIVE" <<'PY'
+          import subprocess
+          import sys
+
+          native = sys.argv[1]
+          output = subprocess.check_output(["readelf", "-lW", native], text=True)
+          aligns = []
+          for line in output.splitlines():
+              parts = line.split()
+              if parts and parts[0] == "LOAD":
+                  aligns.append(int(parts[-1], 16))
+          if not aligns:
+              raise SystemExit("No ELF LOAD segments found")
+          if min(aligns) < 0x4000:
+              raise SystemExit(f"Native ELF is not 16K-page compatible: LOAD aligns={aligns}")
+          print(f"16K ELF LOAD alignment OK: {aligns}")
+          PY
+
+          echo "Final ARM64 APK:"
           ls -lh "$APK"
 
       - name: Upload ARM64 release APK
         uses: actions/upload-artifact@v4
         with:
-          name: ParallaxDrive-ARM64-Release-APK
+          name: ParallaxDrive-ARM64-Stable-Release-APK
           path: artifacts/ParallaxDrive-arm64-release.apk
           if-no-files-found: error
           retention-days: 14
