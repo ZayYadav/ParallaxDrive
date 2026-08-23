@@ -20,6 +20,7 @@ The generated URL has this form:
 http://127.0.0.1:8551/dav/<private-token>/
 ```
 
+
 The app stores only a SHA-256 hash of the token. If the link is lost, regenerate it. Regeneration immediately invalidates the previous link and restarts an enabled WebDAV server.
 
 ## Connect a client
