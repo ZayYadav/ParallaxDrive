@@ -1,0 +1,111 @@
+name: Build Parallax Drive APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - parallax-drive-android-apk
+    paths:
+      - "app/**"
+      - ".github/workflows/android-apk.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - ".github/workflows/android-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK (ARM64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      NDK_VERSION: "28.0.12433566"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Initialize Tauri Android project
+        working-directory: app
+        env:
+          CI: "true"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d src-tauri/gen/android ]; then
+            npm run tauri android init -- --ci
+          fi
+
+      - name: Build Parallax Drive APK
+        working-directory: app
+        env:
+          CI: "true"
+        run: |
+          npm run tauri android build -- \
+            --apk \
+            --debug \
+            --ci \
+            --target aarch64
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
+          test -n "$APK"
+          mkdir -p artifacts
+          cp "$APK" artifacts/ParallaxDrive-arm64-debug.apk
+          ls -lh artifacts/ParallaxDrive-arm64-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParallaxDrive-Android-APK
+          path: artifacts/ParallaxDrive-arm64-debug.apk
+          if-no-files-found: error
+          retention-days: 14
