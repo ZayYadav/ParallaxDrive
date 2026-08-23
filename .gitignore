@@ -1,0 +1,61 @@
+# Node
+node_modules/
+dist/
+/app/test-results/
+/app/playwright-report/
+/supporter-service/.dev.vars
+/supporter-service/.wrangler/
+.DS_Store
+.env
+
+# Rust
+/app/src-tauri/target/
+/app/src-tauri/gen/
+**/*.rs.bk
+
+# Editors
+.vscode/
+.idea/
+
+# Misc
+CompiledApps/
+*.log
+*.key
+Error.html
+**/LatestError.html
+
+# Android local builds
+/android/
+/app/src-tauri/gen/android/
+*.apk
+*.aab
+.gradle/
+local.properties
+*.keystore
+*.idsig
+*.DMP
+
+# Android app files to exclude from git
+/app/src-tauri/src-android/
+/app/src-tauri/tests/android_uri_cache_tests.rs
+/app/src-tauri/gen/schemas/android-schema.json
+/app/src-tauri/icons/android/
+# Android is compiled and signed locally. Keep its reproducibility inputs and
+# local CI helpers out of the desktop-only source repository; publish APKs as
+# GitHub Release assets instead of committing them.
+/.github/workflows/android.yml
+/app/android-overrides/
+/app/scripts/apply-android-overrides.cjs
+/app/scripts/verify-android-artifacts.sh
+.freebuff/
+
+# Internal development and handoff Markdown. Product, release, privacy, REST,
+# and WebDAV documentation remains tracked.
+/DESIGN_HANDOFF.md
+/app/CurrentStreamingSetup.md
+/app/docs/adr/
+*_Full-Analysis.md
+*_Prioritized-Action-List.md
+*_IMPLEMENTATION_PLAN.md
+*_EXECUTION_REPORT.md
+*_DEV_NOTES.md
