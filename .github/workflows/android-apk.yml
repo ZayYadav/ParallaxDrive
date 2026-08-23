@@ -16,6 +16,10 @@ on:
       - "app/**"
       - ".github/workflows/android-apk.yml"
 
+concurrency:
+  group: parallax-drive-android-release
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -94,12 +98,8 @@ jobs:
               raise SystemExit(f"missing generated Gradle file: {p}")
 
           s = p.read_text()
-          # Tauri's generated template can keep Rust debug symbols. Remove the
-          # keep rules so release packaging is allowed to strip native symbols.
           s = re.sub(r'^\s*jniLibs\.keepDebugSymbols\.add\([^\n]+\)\s*$', '', s, flags=re.M)
 
-          # R8 is already enabled by Tauri for release; also shrink unused
-          # Android resources.
           if "isShrinkResources = true" not in s:
               s, count = re.subn(
                   r'(getByName\("release"\)\s*\{\s*\n\s*isMinifyEnabled\s*=\s*true)',
