@@ -1,4 +1,4 @@
-name: Build Parallax Drive APK
+name: Build Parallax Drive Release APK
 
 on:
   workflow_dispatch:
@@ -21,9 +21,9 @@ permissions:
 
 jobs:
   android:
-    name: Build Android APK (ARM64)
+    name: Build optimized release APK (ARM64)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     env:
       NDK_VERSION: "28.0.12433566"
@@ -81,31 +81,97 @@ jobs:
             npm run tauri android init -- --ci
           fi
 
-      - name: Build Parallax Drive APK
-        working-directory: app
-        env:
-          CI: "true"
-        run: |
-          npm run tauri android build -- \
-            --apk true \
-            --debug \
-            --ci \
-            --target aarch64
-
-      - name: Collect APK
+      - name: Enable R8/resource shrinking and native symbol stripping
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
-          test -n "$APK"
-          mkdir -p artifacts
-          cp "$APK" artifacts/ParallaxDrive-arm64-debug.apk
-          ls -lh artifacts/ParallaxDrive-arm64-debug.apk
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-      - name: Upload APK artifact
+          p = Path("app/src-tauri/gen/android/app/build.gradle.kts")
+          if not p.exists():
+              raise SystemExit(f"missing generated Gradle file: {p}")
+
+          s = p.read_text()
+          # Tauri's generated template can keep Rust debug symbols. Remove the
+          # keep rules so release packaging is allowed to strip native symbols.
+          s = re.sub(r'^\s*jniLibs\.keepDebugSymbols\.add\([^\n]+\)\s*$', '', s, flags=re.M)
+
+          # R8 is already enabled by Tauri for release; also shrink unused
+          # Android resources.
+          if "isShrinkResources = true" not in s:
+              s, count = re.subn(
+                  r'(getByName\("release"\)\s*\{\s*\n\s*isMinifyEnabled\s*=\s*true)',
+                  r'\1\n            isShrinkResources = true',
+                  s,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit("could not patch release buildType")
+
+          p.write_text(s)
+          print(p.read_text())
+          PY
+
+      - name: Build obfuscated optimized release APK
+        working-directory: app
+        env:
+          CI: "true"
+          PARALLAX_RELEASE_OBFUSCATE: "1"
+        run: |
+          set -euo pipefail
+          npm run tauri android build -- \
+            --apk true \
+            --ci \
+            --target aarch64
+
+      - name: Sign and verify release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' | head -1)"
+          if [ -z "$APK" ]; then
+            APK="$(find app/src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
+          fi
+          test -n "$APK"
+
+          mkdir -p artifacts
+          BUILD_TOOLS="${ANDROID_HOME}/build-tools/36.0.0"
+          KEYSTORE="${RUNNER_TEMP}/parallax-release.jks"
+          STORE_PASS="ParallaxRelease2026"
+
+          keytool -genkeypair -noprompt \
+            -keystore "$KEYSTORE" \
+            -storepass "$STORE_PASS" \
+            -keypass "$STORE_PASS" \
+            -alias parallax \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -dname "CN=Parallax Drive, OU=Parallax, O=Parallax, L=Surat, ST=Gujarat, C=IN"
+
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$APK" artifacts/ParallaxDrive-arm64-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias parallax \
+            --ks-pass "pass:${STORE_PASS}" \
+            --key-pass "pass:${STORE_PASS}" \
+            --out artifacts/ParallaxDrive-arm64-release.apk \
+            artifacts/ParallaxDrive-arm64-release-aligned.apk
+
+          rm -f artifacts/ParallaxDrive-arm64-release-aligned.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs artifacts/ParallaxDrive-arm64-release.apk
+
+          echo "Final APK:"
+          ls -lh artifacts/ParallaxDrive-arm64-release.apk
+          echo "Native library size inside APK:"
+          unzip -l artifacts/ParallaxDrive-arm64-release.apk | grep 'lib/arm64-v8a/libapp_lib.so' || true
+
+      - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ParallaxDrive-Android-APK
-          path: artifacts/ParallaxDrive-arm64-debug.apk
+          name: ParallaxDrive-Release-APK
+          path: artifacts/ParallaxDrive-arm64-release.apk
           if-no-files-found: error
           retention-days: 14
