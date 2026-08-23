@@ -98,7 +98,9 @@ jobs:
               raise SystemExit(f"missing generated Gradle file: {p}")
 
           s = p.read_text()
-          s = re.sub(r'^\s*jniLibs\.keepDebugSymbols\.add\([^\n]+\)\s*$', '', s, flags=re.M)
+          # Tauri may generate keepDebugSymbols calls inline with packaging {.
+          # Remove every occurrence so release native symbols can actually strip.
+          s = re.sub(r'\s*jniLibs\.keepDebugSymbols\.add\("[^"]+"\)', '', s)
 
           if "isShrinkResources = true" not in s:
               s, count = re.subn(
