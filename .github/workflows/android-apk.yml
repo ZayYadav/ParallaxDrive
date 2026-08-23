@@ -87,7 +87,7 @@ jobs:
           CI: "true"
         run: |
           npm run tauri android build -- \
-            --apk \
+            --apk true \
             --debug \
             --ci \
             --target aarch64
