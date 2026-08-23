@@ -10,6 +10,22 @@ function fail(message) {
   process.exit(1);
 }
 
+function runNodePrepare(scriptName, label) {
+  const prepareScript = path.join(__dirname, scriptName);
+  const prepare = spawnSync(process.execPath, [prepareScript], {
+    cwd: appRoot,
+    env: process.env,
+    stdio: 'inherit',
+  });
+
+  if (prepare.error) {
+    fail(`Unable to prepare ${label}: ${prepare.error.message}`);
+  }
+  if (prepare.status !== 0) {
+    process.exit(prepare.status ?? 1);
+  }
+}
+
 if (process.platform === 'win32' && args[0] === 'build') {
   const prepareScript = path.join(__dirname, 'prepare-windows-runtime.ps1');
   const prepare = spawnSync(
@@ -31,6 +47,20 @@ if (process.platform === 'win32' && args[0] === 'build') {
   if (!hasCustomConfig) {
     args.push('--config', 'src-tauri/tauri.windows.release.conf.json');
   }
+}
+
+const isAndroidCommand = args[0] === 'android';
+const androidSubcommand = args[1];
+
+// Patch Rust/mobile lifecycle before both init and compile. This is idempotent and
+// prevents desktop AppHandle::exit teardown from racing Android Binder threads.
+if (isAndroidCommand && ['init', 'build', 'dev'].includes(androidSubcommand)) {
+  runNodePrepare('prepare-android-rust-lifecycle.cjs', 'the Android Rust lifecycle');
+}
+
+// Build/dev runs also need generated Kotlin/manifest/JNI glue.
+if (isAndroidCommand && (androidSubcommand === 'build' || androidSubcommand === 'dev')) {
+  runNodePrepare('prepare-android-runtime.cjs', 'the Android runtime');
 }
 
 const cliPackagePath = path.join(
