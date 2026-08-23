@@ -81,15 +81,25 @@ if (generatedMain.endsWith('.java') && generatedMain !== kotlinMain) {
 
 const mainActivitySource = `package ${appId}
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import androidx.core.content.FileProvider
 import java.io.File
+import java.security.KeyStore
 import java.util.concurrent.atomic.AtomicInteger
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        appContext = applicationContext
         currentActivity = this
         recordShareIntent(intent)
     }
@@ -97,12 +107,14 @@ class MainActivity : TauriActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        appContext = applicationContext
         currentActivity = this
         recordShareIntent(intent)
     }
 
     override fun onResume() {
         super.onResume()
+        appContext = applicationContext
         currentActivity = this
     }
 
@@ -120,12 +132,106 @@ class MainActivity : TauriActivity() {
     }
 
     companion object {
+        private const val SUPPORTER_KEY_ALIAS = "parallax-supporter-secrets-v1"
+        private const val SUPPORTER_PREFS = "parallax-supporter-secrets-v1"
+        private const val SUPPORTER_PREFIX = "secret:"
+
         @Volatile
         private var currentActivity: MainActivity? = null
+
+        @Volatile
+        private var appContext: Context? = null
+
         private val pendingShareCount = AtomicInteger(0)
 
         @JvmStatic
         fun getAndClearShareCount(): Int = pendingShareCount.getAndSet(0)
+
+        private fun supporterKey(): SecretKey {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val existing = keyStore.getKey(SUPPORTER_KEY_ALIAS, null) as? SecretKey
+            if (existing != null) return existing
+
+            val generator = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES,
+                "AndroidKeyStore",
+            )
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    SUPPORTER_KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setRandomizedEncryptionRequired(true)
+                    .build(),
+            )
+            return generator.generateKey()
+        }
+
+        @JvmStatic
+        fun getSupporterSecret(account: String): String? {
+            val context = appContext ?: currentActivity?.applicationContext ?: return null
+            return try {
+                val encoded = context
+                    .getSharedPreferences(SUPPORTER_PREFS, Context.MODE_PRIVATE)
+                    .getString(SUPPORTER_PREFIX + account, null)
+                    ?: return null
+                val payload = Base64.decode(encoded, Base64.NO_WRAP)
+                if (payload.size <= 12) return null
+
+                val iv = payload.copyOfRange(0, 12)
+                val ciphertext = payload.copyOfRange(12, payload.size)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(
+                    Cipher.DECRYPT_MODE,
+                    supporterKey(),
+                    GCMParameterSpec(128, iv),
+                )
+                String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        @JvmStatic
+        fun putSupporterSecret(account: String, secret: String): Boolean {
+            val context = appContext ?: currentActivity?.applicationContext ?: return false
+            return try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, supporterKey())
+                val ciphertext = cipher.doFinal(secret.toByteArray(Charsets.UTF_8))
+                val iv = cipher.iv
+                val payload = ByteArray(iv.size + ciphertext.size)
+                System.arraycopy(iv, 0, payload, 0, iv.size)
+                System.arraycopy(ciphertext, 0, payload, iv.size, ciphertext.size)
+
+                context
+                    .getSharedPreferences(SUPPORTER_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(
+                        SUPPORTER_PREFIX + account,
+                        Base64.encodeToString(payload, Base64.NO_WRAP),
+                    )
+                    .commit()
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        @JvmStatic
+        fun deleteSupporterSecret(account: String): Boolean {
+            val context = appContext ?: currentActivity?.applicationContext ?: return false
+            return try {
+                context
+                    .getSharedPreferences(SUPPORTER_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(SUPPORTER_PREFIX + account)
+                    .commit()
+            } catch (_: Throwable) {
+                false
+            }
+        }
 
         @JvmStatic
         fun openFileExternally(filePath: String, mimeType: String): Boolean {
