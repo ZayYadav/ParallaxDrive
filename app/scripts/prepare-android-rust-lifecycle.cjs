@@ -58,18 +58,57 @@ if (lib.includes(exitEvent) && !lib.includes(`        #[cfg(not(target_os = "and
   );
 }
 
+// Do not probe/spawn a desktop FFmpeg binary on Android startup. Android's
+// streaming Actix server is already disabled, so this is pure background I/O.
+const ffmpegSpawn = '            tauri::async_runtime::spawn(async move {\n                if let Some(ffmpeg) = transcode::detect_ffmpeg(&app_handle).await {';
+if (lib.includes(ffmpegSpawn) && !lib.includes(`            #[cfg(not(target_os = "android"))]\n${ffmpegSpawn}`)) {
+  lib = lib.replace(
+    ffmpegSpawn,
+    `            #[cfg(not(target_os = "android"))]\n${ffmpegSpawn}`,
+  );
+}
+
+// Folder sync uses desktop filesystem watching. Keep its state/commands available
+// but never start the watcher worker automatically on Android.
+const syncStart = '            if let Err(error) = app.state::<sync_engine::SyncEngine>().start() {';
+if (lib.includes(syncStart) && !lib.includes(`            #[cfg(not(target_os = "android"))]\n${syncStart}`)) {
+  lib = lib.replace(
+    syncStart,
+    `            #[cfg(not(target_os = "android"))]\n${syncStart}`,
+  );
+}
+
+// A failed Tauri setup/build must not panic across the mobile/JNI entry point.
+// Return cleanly after logging instead of using expect().
+const buildExpect = '        .build(tauri::generate_context!())\n        .expect("error while building tauri application");';
+const buildSafe = `        .build(tauri::generate_context!());\n\n    let app = match app {\n        Ok(app) => app,\n        Err(error) => {\n            log::error!("Android/Tauri startup build failed: {error}");\n            return;\n        }\n    };`;
+if (lib.includes(buildExpect)) {
+  lib = lib.replace(buildExpect, buildSafe);
+}
+
 if (!lib.includes('env_logger::try_init()')) {
   fail('idempotent logger initialization marker missing');
 }
 if (!lib.includes(`#[cfg(not(target_os = "android"))]\n${gracefulLine}`)) {
   fail('Android exclusion for graceful-exit state missing');
 }
-if (!lib.includes(`#[cfg(not(target_os = "android"))]\n${exitRequested.trimStart()}`) &&
-    !lib.includes(`        #[cfg(not(target_os = "android"))]\n${exitRequested}`)) {
+if (!lib.includes(`        #[cfg(not(target_os = "android"))]\n${exitRequested}`)) {
   fail('Android exclusion for ExitRequested missing');
 }
 if (!lib.includes(`        #[cfg(not(target_os = "android"))]\n${exitEvent}`)) {
   fail('Android exclusion for Exit event missing');
+}
+if (!lib.includes(`            #[cfg(not(target_os = "android"))]\n${ffmpegSpawn}`)) {
+  fail('Android exclusion for FFmpeg startup probe missing');
+}
+if (!lib.includes(`            #[cfg(not(target_os = "android"))]\n${syncStart}`)) {
+  fail('Android exclusion for sync watcher startup missing');
+}
+if (!lib.includes('Android/Tauri startup build failed: {error}')) {
+  fail('panic-free Tauri build marker missing');
+}
+if (lib.includes('.expect("error while building tauri application")')) {
+  fail('panic-prone Tauri build expect remains');
 }
 if (lib.includes(oldPackage)) {
   fail('stale pre-rebrand Android package remains in Rust source');
