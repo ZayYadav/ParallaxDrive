@@ -33,7 +33,6 @@ let after = 0;
 for (const file of files) {
   const inputSize = statSync(file).size;
   before += inputSize;
-
   const tempDir = mkdtempSync(join(tmpdir(), "parallax-obf-"));
 
   try {
@@ -46,13 +45,19 @@ for (const file of files) {
       "--compact", "true",
       "--simplify", "true",
       "--identifier-names-generator", "hexadecimal",
-      "--control-flow-flattening", "true",
-      "--control-flow-flattening-threshold", "0.75",
+
+      // Keep release protection without control-flow rewriting. Heavy control-flow
+      // flattening can alter timing/stack behavior inside Android WebView startup
+      // bundles and makes production failures much harder to diagnose.
+      "--control-flow-flattening", "false",
       "--dead-code-injection", "false",
       "--rename-globals", "false",
       "--rename-properties", "false",
+
+      // String/identifier protection remains enabled and is considerably safer
+      // for React/Tauri runtime code than structural control-flow transforms.
       "--string-array", "true",
-      "--string-array-threshold", "0.60",
+      "--string-array-threshold", "0.50",
       "--string-array-encoding", "base64",
       "--string-array-rotate", "true",
       "--string-array-shuffle", "true",
