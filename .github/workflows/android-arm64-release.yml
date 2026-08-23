@@ -120,6 +120,11 @@ jobs:
           grep -F 'package com.parallax.drive' "$MAIN"
           grep -F 'fun openFileExternally' "$MAIN"
           grep -F 'fun getAndClearShareCount' "$MAIN"
+          grep -F 'fun getSupporterSecret(account: String): String?' "$MAIN"
+          grep -F 'fun putSupporterSecret(account: String, secret: String): Boolean' "$MAIN"
+          grep -F 'fun deleteSupporterSecret(account: String): Boolean' "$MAIN"
+          grep -F 'KeyStore.getInstance("AndroidKeyStore")' "$MAIN"
+          grep -F 'Cipher.getInstance("AES/GCM/NoPadding")' "$MAIN"
           grep -F 'package com.parallax.drive' "$SERVICE"
           grep -F 'fun startService' "$SERVICE"
           grep -F 'fun stopService' "$SERVICE"
@@ -167,6 +172,26 @@ jobs:
             --apk true \
             --ci \
             --target aarch64
+
+      - name: Validate compiled JNI bridge signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN_CLASS="$(find app/src-tauri/gen/android/app/build -type f -path '*/com/parallax/drive/MainActivity.class' -print | head -1)"
+          if [ -z "$MAIN_CLASS" ]; then
+            echo "::error::Compiled MainActivity.class was not found"
+            exit 1
+          fi
+
+          CLASS_ROOT="${MAIN_CLASS%/com/parallax/drive/MainActivity.class}"
+          JAVAP_OUT="${RUNNER_TEMP}/ParallaxDrive-MainActivity.javap.txt"
+          javap -classpath "$CLASS_ROOT" -public com.parallax.drive.MainActivity | tee "$JAVAP_OUT"
+
+          grep -E 'static .*java\.lang\.String getSupporterSecret\(java\.lang\.String\);' "$JAVAP_OUT"
+          grep -E 'static .*boolean putSupporterSecret\(java\.lang\.String, java\.lang\.String\);' "$JAVAP_OUT"
+          grep -E 'static .*boolean deleteSupporterSecret\(java\.lang\.String\);' "$JAVAP_OUT"
+          grep -E 'static .*boolean openFileExternally\(java\.lang\.String, java\.lang\.String\);' "$JAVAP_OUT"
+          grep -E 'static .*int getAndClearShareCount\(\);' "$JAVAP_OUT"
 
       - name: Sign and 16K-align ARM64 release APK
         shell: bash
@@ -235,6 +260,9 @@ jobs:
           grep -F 'Lcom/parallax/drive/UploadForegroundService;' "$DEX_DUMP"
           grep -F 'openFileExternally' "$DEX_DUMP"
           grep -F 'getAndClearShareCount' "$DEX_DUMP"
+          grep -F 'getSupporterSecret' "$DEX_DUMP"
+          grep -F 'putSupporterSecret' "$DEX_DUMP"
+          grep -F 'deleteSupporterSecret' "$DEX_DUMP"
           if grep -F 'Lcom/cameronamer/telegramdrive/' "$DEX_DUMP"; then
             echo "::error::Old package class remains in release DEX"
             exit 1
@@ -248,6 +276,9 @@ jobs:
           strings "$NATIVE" > "$NATIVE_STRINGS"
           grep -F 'com.parallax.drive.MainActivity' "$NATIVE_STRINGS"
           grep -F 'com.parallax.drive.UploadForegroundService' "$NATIVE_STRINGS"
+          grep -F 'getSupporterSecret' "$NATIVE_STRINGS"
+          grep -F 'putSupporterSecret' "$NATIVE_STRINGS"
+          grep -F 'deleteSupporterSecret' "$NATIVE_STRINGS"
           if grep -F 'com.cameronamer.telegramdrive' "$NATIVE_STRINGS"; then
             echo "::error::Old package string remains in native library"
             exit 1
@@ -277,7 +308,7 @@ jobs:
       - name: Upload ARM64 release APK
         uses: actions/upload-artifact@v4
         with:
-          name: ParallaxDrive-ARM64-Stable-Release-APK
+          name: ParallaxDrive-ARM64-JNI-Fixed-Release-APK
           path: artifacts/ParallaxDrive-arm64-release.apk
           if-no-files-found: error
           retention-days: 14
