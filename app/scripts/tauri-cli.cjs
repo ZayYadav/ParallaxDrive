@@ -33,6 +33,24 @@ if (process.platform === 'win32' && args[0] === 'build') {
   }
 }
 
+// Every Android build/dev run must prepare the generated Android project and
+// normalize stale pre-rebrand JNI package names before Cargo/Gradle compile.
+if (args[0] === 'android' && (args[1] === 'build' || args[1] === 'dev')) {
+  const prepareScript = path.join(__dirname, 'prepare-android-runtime.cjs');
+  const prepare = spawnSync(process.execPath, [prepareScript], {
+    cwd: appRoot,
+    env: process.env,
+    stdio: 'inherit',
+  });
+
+  if (prepare.error) {
+    fail(`Unable to prepare the Android runtime: ${prepare.error.message}`);
+  }
+  if (prepare.status !== 0) {
+    process.exit(prepare.status ?? 1);
+  }
+}
+
 const cliPackagePath = path.join(
   appRoot,
   'node_modules',
